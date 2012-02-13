@@ -190,8 +190,45 @@
 (defun ulist-offset (s)
   (match-end *ulist-re* s))
 
+(defun read-pre (prev e)
+  (labels ((%loop (lines e)
+             (let ((some (enum-peek e)))
+               (if (and some
+                        (>= (car some) (+ prev 4)))
+                   (destructuring-bind (indentation s blankp)
+                       some
+                     (declare (ignore s blankp))
+                     (enum-junk e)
+                     (%loop (cons (concatenate 'string (make-string (- indentation prev 4) :initial-element #\Space)
+                                               (cadr some)) lines) e))
+                   (list :pre (apply #'concatenate 'string (list (format nil "~a" #\Newline)) (reverse lines)))))))
+    (%loop nil e)))
+
+(defun read-heading (s)
+  (let* ((s^ (string-trim '(#\#) s))
+         (level (- (length s) (length s^))))
+    (list :heading (list level (parse-text s^)))))
+
+(defun push-remainder (indent s e &optional (first 2))
+  (let* ((s (subseq s first))
+         (s^ (string-strip s)))
+    (enum-push e (list (+ indent first (indentation s)) s^ (string= s^ "")))))
+
+(defun read-ul (indent e)
+  (read-list (lambda (f o) (list :ulist f o))
+             #'ulist-offset indent e))
+
+(defun read-ol (indent e)
+  (read-list (lambda (f o) (list :olist f o))
+             #'olist-offset indent e))
+
+
 ;;; parser.lisp ends here
 
 ;;; Local Variables:
 ;;; mode: lisp
 ;;; End:
+
+
+
+
