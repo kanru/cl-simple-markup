@@ -222,13 +222,86 @@
   (read-list (lambda (f o) (list :olist f o))
              #'olist-offset indent e))
 
+(defun read-list (f item-indent indent e)
+  (labels ((read-item (indent ps &optional prev)
+             (collect (lambda (x) (read-paragraph indent x prev)) e))
+           (read-all (fst others)
+             (skip-blank-line e)
+             (if (enum-peek e)
+                 (destructuring-bind (indent^ s blankp)
+                     (enum-peek e)
+                   (declare (ignore blankp))
+                   (when (>= indent^ indent)
+                     (let ((n (funcall item-indent s)))
+                       (if n
+                           (progn
+                             (enum-junk e)
+                             (push-remainder indent^ s e n)
+                             (read-all fst
+                                       (read-item (1+ indent^) (cons () others) (+ indent^ n))))
+                           (funcall f fst (reverse others))))))
+                 (funcall f fst (reverse others)))))
+    (read-all (read-item (1+ indent) nil 10000) nil)))
+
+(defun skip-blank-line (e)
+  (if (enum-peek e)
+      (destructuring-bind (a b blankp)
+          (enum-peek e)
+        (declare (ignore a b))
+        (if blankp
+            (progn
+              (enum-junk e)
+              (skip-blank-line e))))))
+
+(defun snd-is-space-p (s)
+  (and (> (length s) 1)
+       (char= (char s 1) #\Space)))
+
+(defun read-quote (indent e)
+  (labels ((push-and-finish (e elm)
+             (enum-push e elm)
+             (signal "no-more-elements"))
+           (next-without-lt (item)
+             (destructuring-bind (n s blankp)
+                 item
+               (if blankp
+                   (push-and-finish e item)
+                   (if (or (< n indent)
+                           (not (char= (char s 0) #\>)))
+                       (push-and-finish e item)
+                       (let* ((s (subseq s 1))
+                              (s^ (string-strip s)))
+                         (list (- (length s) (length s^)) s^ (string= s^ ""))))))))
+    (let ((enum (collect (lambda (e) (read-paragraph 0 e))
+                  (enum-map #'next-without-lt e))))
+      (if enum
+          (list :quote (items enum))))))
+
+(defun read-normal (prev e)
+  (labels ((gettxt (prev ls)
+             (labels ((ret ()
+                        (format nil "~{~S~^ ~}" ls)))
+               (if (enum-peek e)
+                   (destructuring-bind (indent l blankp)
+                       (enum-peek e)
+                     (if blankp
+                         (ret)
+                         (cond
+                           ((>= indent (+ prev 4)) (ret))
+                           ((and (or (char= (char l 0) #\#)
+                                     (char= (char l 0) #\>))
+                                 (snd-is-space-p l))
+                            (ret))
+                           ((or (olistp l)
+                                (ulistp l))
+                            (ret))
+                           (t (enum-junk e)
+                              (gettxt indent (cons l ls))))))
+                   (ret)))))
+    (list :normal (parse-text (gettxt prev nil)))))
 
 ;;; parser.lisp ends here
 
 ;;; Local Variables:
 ;;; mode: lisp
 ;;; End:
-
-
-
-
