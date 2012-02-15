@@ -59,6 +59,25 @@
 (defun enum-map (fun enum)
   (make-enum (mapcar fun (items enum))))
 
+;;; Line
+
+(defclass line ()
+  ((indent :initarg :indent
+           :initform 0
+           :accessor indent)
+   (line :initarg :line
+         :initform ""
+         :accessor line)
+   (blankp :initarg :blankp
+           :initform nil
+           :accessor blankp)))
+
+(defun enum-push-line (enum indent line blankp)
+  (let ((item (make-instance 'line :indent indent
+                                   :line line
+                                   :blankp blankp)))
+    (enum-push enum item)))
+
 ;;; Parser
 
 (defun collect (f x)
@@ -83,7 +102,9 @@
 (defun parse-enum (e)
   (collect (lambda (e) (read-paragraph 0 e))
     (enum-map (lambda (l) (let ((l^ (string-strip l)))
-                       (list (indentation l) l^ (string= l^ ""))))
+                       (make-instance 'line :indent (indentation l)
+                                            :line l^
+                                            :blankp (string= l^ ""))))
               (enum-map #'expand-tabs e))))
 
 (defun string-strip (s)
@@ -110,25 +131,21 @@
 
 (defun read-paragraph (indent e &optional (prev indent))
   (let ((some (enum-peek e)))
-    (case (car some)
-      (:none '(:none))
-      (:some
-       (destructuring-bind (indentation line isblank)
-           (cdr some)
-         (if isblank
-             (progn
-               (enum-junk e)
-               (read-paragraph indent e prev))
-             (if (< indentation indent)
-                 '(:none)
-                 (progn
-                   (enum-junk e)
-                   (read-nonempty indentation e line prev)))))))))
+    (typecase some
+      (null nil)
+      (line
+       (if (blankp some)
+           (progn
+             (enum-junk e)
+             (read-paragraph indent e prev))
+           (when (>= indent (indent some))
+             (enum-junk e)
+             (read-nonempty (indent some) e (line some) prev)))))))
 
 (defun read-nonempty (indent e s &optional prev)
   (cond
     ((>= indent (+ prev 4))
-     (enum-push e (list indent s nil))
+     (enum-push-line e indent s nil)
      (read-pre prev e))
     ((char= #\# (char s 0))
      (read-heading s))
@@ -141,18 +158,18 @@
     ((and (char= #\> (char s 0))
           (or (snd-is-space-p s)
               (string= s ">")))
-     (enum-push e (list indent s nil))
+     (enum-push-line e indent s nil)
      (read-quote indent e))
     (t
      (let* ((some (enum-peek e))
-            (l (second some)))
+            (l (line some)))
        (cond
          ((or (all #\= l)
               (all #\- l))
           (enum-junk e)
           (list :heading (list (hlevel l) (parse-text s))))
          (t
-          (enum-push e (list indent s nil))
+          (enum-push-line e indent s nil)
           (read-normal prev e)))))))
 
 (defun all (c s)
@@ -194,13 +211,11 @@
   (labels ((%loop (lines e)
              (let ((some (enum-peek e)))
                (if (and some
-                        (>= (car some) (+ prev 4)))
-                   (destructuring-bind (indentation s blankp)
-                       some
-                     (declare (ignore s blankp))
+                        (>= (indent some) (+ prev 4)))
+                   (progn
                      (enum-junk e)
-                     (%loop (cons (concatenate 'string (make-string (- indentation prev 4) :initial-element #\Space)
-                                               (cadr some)) lines) e))
+                     (%loop (cons (concatenate 'string (make-string (- (indent some) prev 4) :initial-element #\Space)
+                                               (line some)) lines) e))
                    (list :pre (apply #'concatenate 'string (list (format nil "~a" #\Newline)) (reverse lines)))))))
     (%loop nil e)))
 
@@ -212,7 +227,7 @@
 (defun push-remainder (indent s e &optional (first 2))
   (let* ((s (subseq s first))
          (s^ (string-strip s)))
-    (enum-push e (list (+ indent first (indentation s)) s^ (string= s^ "")))))
+    (enum-push-line e (+ indent first (indentation s)) s^ (string= s^ ""))))
 
 (defun read-ul (indent e)
   (read-list (lambda (f o) (list :ulist f o))
@@ -228,30 +243,25 @@
            (read-all (fst others)
              (skip-blank-line e)
              (if (enum-peek e)
-                 (destructuring-bind (indent^ s blankp)
-                     (enum-peek e)
-                   (declare (ignore blankp))
-                   (when (>= indent^ indent)
-                     (let ((n (funcall item-indent s)))
+                 (let ((some (enum-peek e)))
+                   (when (>= (indent some) indent)
+                     (let ((n (funcall item-indent (line some))))
                        (if n
                            (progn
                              (enum-junk e)
-                             (push-remainder indent^ s e n)
+                             (push-remainder (indent some) (line some) e n)
                              (read-all fst
-                                       (read-item (1+ indent^) (cons () others) (+ indent^ n))))
+                                       (read-item (1+ (indent some)) (cons () others) (+ (indent some) n))))
                            (funcall f fst (reverse others))))))
                  (funcall f fst (reverse others)))))
     (read-all (read-item (1+ indent) nil 10000) nil)))
 
 (defun skip-blank-line (e)
-  (if (enum-peek e)
-      (destructuring-bind (a b blankp)
-          (enum-peek e)
-        (declare (ignore a b))
-        (if blankp
-            (progn
-              (enum-junk e)
-              (skip-blank-line e))))))
+  (let ((some (enum-peek e)))
+    (when (and some
+               (blankp some))
+      (enum-junk e)
+      (skip-blank-line e))))
 
 (defun snd-is-space-p (s)
   (and (> (length s) 1)
@@ -262,16 +272,16 @@
              (enum-push e elm)
              (signal "no-more-elements"))
            (next-without-lt (item)
-             (destructuring-bind (n s blankp)
-                 item
-               (if blankp
-                   (push-and-finish e item)
-                   (if (or (< n indent)
-                           (not (char= (char s 0) #\>)))
-                       (push-and-finish e item)
-                       (let* ((s (subseq s 1))
-                              (s^ (string-strip s)))
-                         (list (- (length s) (length s^)) s^ (string= s^ ""))))))))
+             (if (blankp item)
+                 (push-and-finish e item)
+                 (if (or (< (indent item) indent)
+                         (not (char= (char (line item) 0) #\>)))
+                     (push-and-finish e item)
+                     (let* ((s (subseq (line item) 1))
+                            (s^ (string-strip s)))
+                       (make-instance 'line :indent (- (length s) (length s^))
+                                            :line s^
+                                            :blankp (string= s^ "")))))))
     (let ((enum (collect (lambda (e) (read-paragraph 0 e))
                   (enum-map #'next-without-lt e))))
       (if enum
@@ -281,22 +291,21 @@
   (labels ((gettxt (prev ls)
              (labels ((ret ()
                         (format nil "~{~S~^ ~}" ls)))
-               (if (enum-peek e)
-                   (destructuring-bind (indent l blankp)
-                       (enum-peek e)
-                     (if blankp
-                         (ret)
-                         (cond
-                           ((>= indent (+ prev 4)) (ret))
-                           ((and (or (char= (char l 0) #\#)
-                                     (char= (char l 0) #\>))
-                                 (snd-is-space-p l))
-                            (ret))
-                           ((or (olistp l)
-                                (ulistp l))
-                            (ret))
-                           (t (enum-junk e)
-                              (gettxt indent (cons l ls))))))
+               (let ((some (enum-peek e)))
+                 (when some
+                   (if (blankp some)
+                       (ret)
+                       (cond
+                         ((>= (indent some) (+ prev 4)) (ret))
+                         ((and (or (char= (char (line some) 0) #\#)
+                                   (char= (char (line some) 0) #\>))
+                               (snd-is-space-p (line some)))
+                          (ret))
+                         ((or (olistp (line some))
+                              (ulistp (line some)))
+                          (ret))
+                         (t (enum-junk e)
+                            (gettxt (indent some) (cons (line some) ls))))))
                    (ret)))))
     (list :normal (parse-text (gettxt prev nil)))))
 
