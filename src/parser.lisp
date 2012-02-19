@@ -93,7 +93,7 @@
     (loop when (read-line in nil)
           collect it)))
 
-(defun parse-text (s)
+(defun parse (s)
   (parse-lines (lines s)))
 
 (defun parse-lines (ls)
@@ -308,6 +308,130 @@
                             (gettxt (indent some) (cons (line some) ls))))))
                    (ret)))))
     (list :normal (parse-text (gettxt prev nil)))))
+
+(defclass parse-state ()
+  ((max :initarg :max
+        :accessor pt-max)
+   (current :initarg :current
+            :accessor pt-current)
+   (fragments :initarg :fragments
+              :accessor pt-fragments)))
+
+(defun make-pt (max current fragments)
+  (make-instance 'parse-state :max max :current current :fragments fragments))
+
+(defun make-fragment ()
+  (make-string-output-stream))
+
+(defun parse-text (s)
+  (scan s (make-pt (length s) () (make-fragment)) 0))
+
+(defun scan (s st n)
+  (let ((max (pt-max st)))
+    (labels ((delim (f d s st n)
+               (delimited (lambda (fst lst)
+                            (funcall f (unescape-slice s fst lst))) d s st n)))
+      (if (>= n max)
+          (reverse (push-current st))
+          (cond
+            ((char= (char s n) #\`)
+             (delim (lambda (s) `(:code ,s)) "`" s st n))
+            ((and (char= (char s n) #\*)
+                  (< (1+ n) max)
+                  (char= (char s (1+ n)) #\*))
+             (delim (lambda (s) `(:bold ,s)) "**" s st n))
+            ((and (char= (char s n) #\_)
+                  (< (1+ n) max)
+                  (char= (char s (1+ n)) #\_))
+             (delim (lambda (s) `(:bold ,s)) "__" s st n))
+            ((or (char= (char s n) #\*)
+                 (char= (char s n) #\_))
+             (delim (lambda (s) `(:emph ,s)) (subseq s n (1+ n)) s st n))
+            ((char= (char s n) #\=)
+             (delimited (lambda (fst lst)
+                          `(:struck ,(scan s (make-pt lst () (make-fragment)) fst)))
+                        "==" s st n))
+            ((and (char= (char s n) #\!)
+                  (matches-at s n "![" :max max))
+             (maybe-link "![" (lambda (ref) `(:image ,(src ref) ,(desc ref)))
+                         s st (+ n 2)))
+            ((char= (char s n) #\[)
+             (maybe-link "["
+                         (lambda (ref)
+                           (cond
+                             ((and (string= (src ref) "")
+                                   (string= (desc ref) ""))
+                              `(:text ""))
+                             ((string= (src ref) "")
+                              `(:link ,(desc ref) ,(desc ref)))
+                             ((and (string= (desc ref) "")
+                                   (char= (char (src ref) 0) #\#))
+                              `(:anchor ,(subseq (src ref) 1)))
+                             (t
+                              `(:link ,(src ref) ,(desc ref)))))
+                         s st (1+ n)))
+            ((and (char= (char s n) #\\)
+                  (< (1+ n) max))
+             (write-char (char s (1+ n)) (pt-current st))
+             (scan s st (+ n 2)))
+            (t
+             (write-char (char s n) (current st))
+             (scan s st (+ n 1))))))))
+
+(defmacro if-bind ((var expr) form1 &optional form2)
+  `(let ((,var ,expr))
+     (if ,var
+         ,form1
+         ,form2)))
+
+(defun delimited (f delim s st first)
+  (let ((delim-len (length delim)))
+    (labels ((scan-from-next-char ()
+               (write-char (char s first) (pt-current st))
+               (scan s st (1+ first))))
+      (if (not (matches-at s first delim :max (pt-max st)))
+          (scan-from-next-char)
+          (if-bind (n (scan-past s (+ first delim-len) :delim s :max (pt-max st)))
+                   (let ((chunk (funcall f (+ first delim-len) (- n delim-len))))
+                     (scan s (make-pt (pt-max st)
+                                      (cons chunk (push-current st))
+                                      (make-fragment))
+                           n))
+                   (scan-from-next-char))))))
+
+(defun maybe-link (delim f s st n)
+  (if-bind (link (scan-link s n :max (pt-max st)))
+           (destructuring-bind (ref n) link
+             (scan s (make-pt (pt-max st)
+                              (funcall f (cons ref (push-current st)))
+                              (make-fragment))
+                   n))
+           (progn
+             (write-string delim (pt-current st))
+             (scan s st n))))
+
+(defun scan-past (s n &key delim max)
+  (loop for m = n then pos
+        for pos = (search delim s :start2 m)
+        while (and pos (< pos max))
+        when (not (char= (char s pos) #\\))
+          return pos))
+
+(defun scan-link (s n &key max)
+  (if-bind (end-of-desc (scan-past s n :max max :delim "]"))
+           (when (and (< end-of-desc max)
+                      (char= (char s end-of-desc) #\())
+             (if-bind (end-of-uri (scan-past s (1+ end-of-desc) :delim ")" :max max))
+                      (cons (make-ref (unescape-slice s n (1- end-of-desc))
+                                      (unescape-slice s
+                                                      (1+ end-of-desc)
+                                                      (1- end-of-uri)))
+                            end-of-uri)))))
+
+(defun matches-at (s n delim &key (max (length s)))
+  (let ((len (length delim)))
+    (and (>= max (+ n len))
+         (string= s delim :start1 n :end1 (+ n len)))))
 
 ;;; parser.lisp ends here
 
