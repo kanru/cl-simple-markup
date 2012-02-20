@@ -223,9 +223,15 @@
                         (>= (indent some) (+ prev 4)))
                    (progn
                      (enum-junk e)
-                     (%loop (cons (concatenate 'string (make-string (- (indent some) prev 4) :initial-element #\Space)
-                                               (line some)) lines) e))
-                   (list :pre (apply #'concatenate 'string (format nil "~a" #\Newline) (reverse lines)))))))
+                     (%loop (cons (concatenate
+                                   'string
+                                   (make-string (- (indent some) prev 4)
+                                                :initial-element #\Space)
+                                   (line some))
+                                  lines)
+                            e))
+                   `(:pre ,(format nil "~{~a~^~%~}"
+                                   (reverse (cons "" lines))))))))
     (%loop nil e)))
 
 (defun read-heading (s)
@@ -298,7 +304,7 @@
 (defun read-normal (prev e)
   (labels ((gettxt (prev ls)
              (labels ((ret ()
-                        (format nil "~{~S~^ ~}" ls)))
+                        (format nil "~{~a~^ ~}" ls)))
                (let ((some (enum-peek e)))
                  (if some
                      (if (blankp some)
