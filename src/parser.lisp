@@ -36,6 +36,8 @@
 
 (in-package #:simple-markup)
 
+(declaim (optimize debug))
+
 ;;; Enum library
 
 (defclass enum ()
@@ -59,6 +61,14 @@
 (defun enum-map (fun enum)
   (make-enum (mapcar fun (items enum))))
 
+;;; Macros
+
+(defmacro if-bind ((var expr) form1 &optional form2)
+  `(let ((,var ,expr))
+     (if ,var
+         ,form1
+         ,form2)))
+
 ;;; Line
 
 (defclass line ()
@@ -81,17 +91,15 @@
 ;;; Parser
 
 (defun collect (f x)
-  (labels ((%loop (acc)
-             (let ((r (funcall f x)))
-               (case (car r)
-                 (:none (reverse acc))
-                 (:some (%loop (cons (cadr r) acc)))))))
-    (%loop nil)))
+  (loop for r = (funcall f x)
+        while r
+        collect r))
 
 (defun lines (s)
   (with-input-from-string (in s)
-    (loop when (read-line in nil)
-          collect it)))
+    (loop as line = (read-line in nil)
+          while line
+          collect line)))
 
 (defun parse (s)
   (parse-lines (lines s)))
@@ -138,7 +146,7 @@
            (progn
              (enum-junk e)
              (read-paragraph indent e prev))
-           (when (>= indent (indent some))
+           (when (>= (indent some) indent)
              (enum-junk e)
              (read-nonempty (indent some) e (line some) prev)))))))
 
@@ -161,19 +169,20 @@
      (enum-push-line e indent s nil)
      (read-quote indent e))
     (t
-     (let* ((some (enum-peek e))
-            (l (line some)))
+     (let* ((some (enum-peek e)))
        (cond
-         ((or (all #\= l)
-              (all #\- l))
+         ((and some
+               (or (all #\= (line some))
+                   (all #\- (line some))))
           (enum-junk e)
-          (list :heading (list (hlevel l) (parse-text s))))
+          (list :heading (list (hlevel (line some)) (parse-text s))))
          (t
           (enum-push-line e indent s nil)
           (read-normal prev e)))))))
 
 (defun all (c s)
-  (every (lambda (char) (char= char c)) s))
+  (and (not (string= s ""))
+       (every (lambda (char) (char= char c)) s)))
 
 (defun hlevel (l)
   (case (char l 0)
@@ -216,7 +225,7 @@
                      (enum-junk e)
                      (%loop (cons (concatenate 'string (make-string (- (indent some) prev 4) :initial-element #\Space)
                                                (line some)) lines) e))
-                   (list :pre (apply #'concatenate 'string (list (format nil "~a" #\Newline)) (reverse lines)))))))
+                   (list :pre (apply #'concatenate 'string (format nil "~a" #\Newline) (reverse lines)))))))
     (%loop nil e)))
 
 (defun read-heading (s)
@@ -238,23 +247,22 @@
              #'olist-offset indent e))
 
 (defun read-list (f item-indent indent e)
-  (labels ((read-item (indent ps &optional prev)
+  (labels ((read-item (indent &optional prev)
              (collect (lambda (x) (read-paragraph indent x prev)) e))
            (read-all (fst others)
              (skip-blank-line e)
-             (if (enum-peek e)
-                 (let ((some (enum-peek e)))
-                   (when (>= (indent some) indent)
-                     (let ((n (funcall item-indent (line some))))
-                       (if n
-                           (progn
-                             (enum-junk e)
-                             (push-remainder (indent some) (line some) e n)
-                             (read-all fst
-                                       (read-item (1+ (indent some)) (cons () others) (+ (indent some) n))))
-                           (funcall f fst (reverse others))))))
-                 (funcall f fst (reverse others)))))
-    (read-all (read-item (1+ indent) nil 10000) nil)))
+             (if-bind (some (enum-peek e))
+                      (if (>= (indent some) indent)
+                          (if-bind (n (funcall item-indent (line some)))
+                                   (progn
+                                     (enum-junk e)
+                                     (push-remainder (indent some) (line some) e n)
+                                     (read-all fst
+                                               (read-item (1+ (indent some)) (+ (indent some) n))))
+                                   (funcall f fst (reverse others)))
+                          (funcall f fst (reverse others)))
+                      (funcall f fst (reverse others)))))
+    (read-all (read-item (1+ indent) 10000) nil)))
 
 (defun skip-blank-line (e)
   (let ((some (enum-peek e)))
@@ -292,21 +300,21 @@
              (labels ((ret ()
                         (format nil "~{~S~^ ~}" ls)))
                (let ((some (enum-peek e)))
-                 (when some
-                   (if (blankp some)
-                       (ret)
-                       (cond
-                         ((>= (indent some) (+ prev 4)) (ret))
-                         ((and (or (char= (char (line some) 0) #\#)
-                                   (char= (char (line some) 0) #\>))
-                               (snd-is-space-p (line some)))
-                          (ret))
-                         ((or (olistp (line some))
-                              (ulistp (line some)))
-                          (ret))
-                         (t (enum-junk e)
-                            (gettxt (indent some) (cons (line some) ls))))))
-                   (ret)))))
+                 (if some
+                     (if (blankp some)
+                         (ret)
+                         (cond
+                           ((>= (indent some) (+ prev 4)) (ret))
+                           ((and (or (char= (char (line some) 0) #\#)
+                                     (char= (char (line some) 0) #\>))
+                                 (snd-is-space-p (line some)))
+                            (ret))
+                           ((or (olistp (line some))
+                                (ulistp (line some)))
+                            (ret))
+                           (t (enum-junk e)
+                              (gettxt (indent some) (cons (line some) ls)))))
+                     (ret))))))
     (list :normal (parse-text (gettxt prev nil)))))
 
 (defclass parse-state ()
@@ -317,7 +325,7 @@
    (fragments :initarg :fragments
               :accessor pt-fragments)))
 
-(defun make-pt (max current fragments)
+(defun make-pt (max fragments current)
   (make-instance 'parse-state :max max :current current :fragments fragments))
 
 (defun make-fragment ()
@@ -375,14 +383,8 @@
              (write-char (char s (1+ n)) (pt-current st))
              (scan s st (+ n 2)))
             (t
-             (write-char (char s n) (current st))
+             (write-char (char s n) (pt-current st))
              (scan s st (+ n 1))))))))
-
-(defmacro if-bind ((var expr) form1 &optional form2)
-  `(let ((,var ,expr))
-     (if ,var
-         ,form1
-         ,form2)))
 
 (defun delimited (f delim s st first)
   (let ((delim-len (length delim)))
@@ -432,6 +434,35 @@
   (let ((len (length delim)))
     (and (>= max (+ n len))
          (string= s delim :start1 n :end1 (+ n len)))))
+
+(defun unescape-slice (s first last)
+  (unescape (string-strip (subseq s first last))))
+
+(defun unescape (s)
+  (with-output-to-string (out)
+    (let ((len (length s)))
+      (loop for i from 0 below len
+            do (cond
+                 ((and (char= (char s i) #\\)
+                       (< i (1- len)))
+                  (write-char (char s (1+ i)) out))
+                 (t
+                  (write-char (char s i) out)))))))
+
+(defclass ref ()
+  ((src :initarg :src
+        :accessor src)
+   (desc :initarg :desc
+         :accessor desc)))
+
+(defun make-ref (src desc)
+  (make-instance 'ref :src src :desc desc))
+
+(defun push-current (st)
+  (let ((content (get-output-stream-string (pt-current st))))
+    (if (plusp (length content))
+        (cons `(:text ,content) (pt-fragments st))
+        (pt-fragments st))))
 
 ;;; parser.lisp ends here
 
