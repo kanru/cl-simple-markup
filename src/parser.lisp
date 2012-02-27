@@ -38,7 +38,13 @@
 
 (declaim (optimize debug))
 
-;;; Enum library
+(defun file->string (filename)
+  (with-open-file (in filename :external-format :utf-8)
+    (let ((buf (make-string (file-length in))))
+      (read-sequence buf in)
+      buf)))
+
+;;; enum library
 
 (defclass enum ()
   ((items :initarg :items
